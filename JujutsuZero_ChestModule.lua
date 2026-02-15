@@ -1,6 +1,6 @@
 -- JujutsuZero_ChestModule.lua
--- Robust Chest / Loot ESP + Teleport Module
--- Fixed structure handling for Jujutsu Zero
+-- ProximityPrompt-based Chest ESP + Teleport
+-- No admin / no explorer required
 -- Author: Debbhai
 
 -- ==============================
@@ -21,17 +21,8 @@ local ChestModule = {}
 -- ==============================
 ChestModule.Enabled = false
 ChestModule.AutoTeleport = false
-ChestModule.ScanInterval = 1.5
+ChestModule.ScanInterval = 1
 ChestModule.MaxDistance = 3000
-
--- Name keywords (still useful, but no longer required)
-ChestModule.NameKeywords = {
-    "chest",
-    "loot",
-    "box",
-    "crate",
-    "curse",
-}
 
 ChestModule.RarityColors = {
     Common = Color3.fromRGB(200, 200, 200),
@@ -52,63 +43,25 @@ local lastScan = 0
 -- ==============================
 -- UTIL
 -- ==============================
-local function nameMatches(name)
-    name = name:lower()
-    for _, k in ipairs(ChestModule.NameKeywords) do
-        if name:find(k) then
-            return true
-        end
-    end
-    return false
-end
+local function getRootFromPrompt(prompt)
+    local parent = prompt.Parent
+    if not parent then return nil end
 
--- Determine if an object "looks like" a chest
-local function isChestCandidate(obj)
-    if obj:IsA("Model") then
-        if nameMatches(obj.Name) then
-            return true
-        end
-
-        -- Structural check: models with at least one BasePart
-        return obj:FindFirstChildWhichIsA("BasePart") ~= nil
+    if parent:IsA("BasePart") then
+        return parent
     end
 
-    if obj:IsA("BasePart") then
-        return nameMatches(obj.Name)
+    if parent:IsA("Model") then
+        return parent.PrimaryPart or parent:FindFirstChildWhichIsA("BasePart")
     end
 
-    return false
-end
-
-local function getChestPart(obj)
-    if obj:IsA("Model") then
-        if obj.PrimaryPart then
-            return obj.PrimaryPart
-        end
-
-        local part = obj:FindFirstChildWhichIsA("BasePart")
-        if part then
-            pcall(function()
-                obj.PrimaryPart = part
-            end)
-            return part
-        end
-    elseif obj:IsA("BasePart") then
-        return obj
-    end
-
-    return nil
+    return parent:FindFirstChildWhichIsA("BasePart")
 end
 
 local function getRarity(obj)
     local attr = obj:GetAttribute("Rarity")
     if typeof(attr) == "string" then
         return attr
-    end
-
-    local rarityValue = obj:FindFirstChild("Rarity")
-    if rarityValue and rarityValue:IsA("StringValue") then
-        return rarityValue.Value
     end
 
     for rarity, _ in pairs(ChestModule.RarityColors) do
@@ -123,32 +76,30 @@ end
 -- ==============================
 -- ESP CREATION
 -- ==============================
-local function createESP(obj)
-    if trackedChests[obj] then return end
+local function createESP(prompt)
+    if trackedChests[prompt] then return end
 
-    local part = getChestPart(obj)
+    local part = getRootFromPrompt(prompt)
     if not part then return end
 
     if (rootPart.Position - part.Position).Magnitude > ChestModule.MaxDistance then
         return
     end
 
-    local rarity = getRarity(obj)
+    local rarity = getRarity(prompt.Parent)
     local color = ChestModule.RarityColors[rarity] or ChestModule.RarityColors.Unknown
 
-    -- Highlight
     local highlight = Instance.new("Highlight")
-    highlight.Adornee = obj:IsA("Model") and obj or part
+    highlight.Adornee = prompt.Parent:IsA("Model") and prompt.Parent or part
     highlight.FillColor = color
     highlight.OutlineColor = Color3.new(1, 1, 1)
     highlight.FillTransparency = 0.35
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    highlight.Parent = obj
+    highlight.Parent = prompt.Parent
 
-    -- Billboard
     local billboard = Instance.new("BillboardGui")
     billboard.Adornee = part
-    billboard.Size = UDim2.new(0, 150, 0, 40)
+    billboard.Size = UDim2.new(0, 160, 0, 40)
     billboard.StudsOffset = Vector3.new(0, 3.5, 0)
     billboard.AlwaysOnTop = true
     billboard.Parent = part
@@ -156,17 +107,16 @@ local function createESP(obj)
     local label = Instance.new("TextLabel")
     label.Size = UDim2.new(1, 0, 1, 0)
     label.BackgroundTransparency = 1
-    label.Text = "📦 " .. rarity .. " Chest"
+    label.Text = "📦 Chest"
     label.TextColor3 = color
     label.TextStrokeTransparency = 0
     label.Font = Enum.Font.GothamBold
     label.TextSize = 16
     label.Parent = billboard
 
-    trackedChests[obj] = {
-        obj = obj,
+    trackedChests[prompt] = {
+        prompt = prompt,
         part = part,
-        rarity = rarity,
         highlight = highlight,
         billboard = billboard,
     }
@@ -183,7 +133,7 @@ local function clearAll()
 end
 
 -- ==============================
--- SCANNING (FIXED)
+-- SCANNING (THE KEY FIX)
 -- ==============================
 local function scan()
     if not ChestModule.Enabled then return end
@@ -191,8 +141,11 @@ local function scan()
     lastScan = tick()
 
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if isChestCandidate(obj) then
-            createESP(obj)
+        if obj:IsA("ProximityPrompt") then
+            -- Ignore NPC / player prompts
+            if not obj.Parent:FindFirstAncestorOfClass("Humanoid") then
+                createESP(obj)
+            end
         end
     end
 end
@@ -215,11 +168,10 @@ function ChestModule:TeleportToNearest()
 
     if not closest then return end
 
-    local targetCF = closest.part.CFrame * CFrame.new(0, 3, 3)
     TweenService:Create(
         rootPart,
         TweenInfo.new(math.clamp(dist / 120, 0.3, 3), Enum.EasingStyle.Quint),
-        { CFrame = targetCF }
+        { CFrame = closest.part.CFrame * CFrame.new(0, 3, 3) }
     ):Play()
 end
 
