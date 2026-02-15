@@ -1,14 +1,17 @@
 -- JujutsuZero_ChestModule.lua
--- Chest / Crate ESP + Teleport (JJK Zero FIXED)
+-- Robust Chest / Loot ESP + Teleport Module
+-- Fixed structure handling for Jujutsu Zero
 -- Author: Debbhai
 
+-- ==============================
+-- SERVICES
+-- ==============================
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
-repeat task.wait() until player.Character
-local character = player.Character
+local character = player.Character or player.CharacterAdded:Wait()
 local rootPart = character:WaitForChild("HumanoidRootPart")
 
 local ChestModule = {}
@@ -21,167 +24,229 @@ ChestModule.AutoTeleport = false
 ChestModule.ScanInterval = 1.5
 ChestModule.MaxDistance = 3000
 
+-- Name keywords (still useful, but no longer required)
+ChestModule.NameKeywords = {
+    "chest",
+    "loot",
+    "box",
+    "crate",
+    "curse",
+}
+
+ChestModule.RarityColors = {
+    Common = Color3.fromRGB(200, 200, 200),
+    Uncommon = Color3.fromRGB(80, 255, 80),
+    Rare = Color3.fromRGB(80, 150, 255),
+    Epic = Color3.fromRGB(180, 80, 255),
+    Legendary = Color3.fromRGB(255, 200, 60),
+    Mythic = Color3.fromRGB(255, 80, 80),
+    Unknown = Color3.fromRGB(255, 255, 255),
+}
+
 -- ==============================
 -- INTERNAL STATE
 -- ==============================
-local tracked = {}
+local trackedChests = {}
 local lastScan = 0
-local ScanRoots = {}
-
--- ==============================
--- SETUP SCAN ROOTS (SAFE)
--- ==============================
-task.spawn(function()
-	repeat task.wait() until game:IsLoaded()
-
-	local function safe(path)
-		local cur = workspace
-		for _, name in ipairs(path) do
-			cur = cur:FindFirstChild(name)
-			if not cur then return nil end
-		end
-		return cur
-	end
-
-	local r1 = safe({"Map","Geometry","Map","Folder"})
-	if r1 then table.insert(ScanRoots, r1) end
-
-	local r2 = safe({"Container","Models"})
-	if r2 then table.insert(ScanRoots, r2) end
-end)
 
 -- ==============================
 -- UTIL
 -- ==============================
-local function getBasePart(model)
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") then
-			return d
-		end
-	end
+local function nameMatches(name)
+    name = name:lower()
+    for _, k in ipairs(ChestModule.NameKeywords) do
+        if name:find(k) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Determine if an object "looks like" a chest
+local function isChestCandidate(obj)
+    if obj:IsA("Model") then
+        if nameMatches(obj.Name) then
+            return true
+        end
+
+        -- Structural check: models with at least one BasePart
+        return obj:FindFirstChildWhichIsA("BasePart") ~= nil
+    end
+
+    if obj:IsA("BasePart") then
+        return nameMatches(obj.Name)
+    end
+
+    return false
+end
+
+local function getChestPart(obj)
+    if obj:IsA("Model") then
+        if obj.PrimaryPart then
+            return obj.PrimaryPart
+        end
+
+        local part = obj:FindFirstChildWhichIsA("BasePart")
+        if part then
+            pcall(function()
+                obj.PrimaryPart = part
+            end)
+            return part
+        end
+    elseif obj:IsA("BasePart") then
+        return obj
+    end
+
+    return nil
+end
+
+local function getRarity(obj)
+    local attr = obj:GetAttribute("Rarity")
+    if typeof(attr) == "string" then
+        return attr
+    end
+
+    local rarityValue = obj:FindFirstChild("Rarity")
+    if rarityValue and rarityValue:IsA("StringValue") then
+        return rarityValue.Value
+    end
+
+    for rarity, _ in pairs(ChestModule.RarityColors) do
+        if obj.Name:lower():find(rarity:lower()) then
+            return rarity
+        end
+    end
+
+    return "Unknown"
 end
 
 -- ==============================
 -- ESP CREATION
 -- ==============================
-local function createESP(model)
-	if tracked[model] then return end
+local function createESP(obj)
+    if trackedChests[obj] then return end
 
-	local part = getBasePart(model)
-	if not part then return end
+    local part = getChestPart(obj)
+    if not part then return end
 
-	local dist = (rootPart.Position - part.Position).Magnitude
-	if dist > ChestModule.MaxDistance then return end
+    if (rootPart.Position - part.Position).Magnitude > ChestModule.MaxDistance then
+        return
+    end
 
-	local highlight = Instance.new("Highlight")
-	highlight.Adornee = model
-	highlight.FillColor = Color3.fromRGB(255, 200, 60)
-	highlight.OutlineColor = Color3.new(1,1,1)
-	highlight.FillTransparency = 0.3
-	highlight.Parent = model
+    local rarity = getRarity(obj)
+    local color = ChestModule.RarityColors[rarity] or ChestModule.RarityColors.Unknown
 
-	local gui = Instance.new("BillboardGui")
-	gui.Adornee = part
-	gui.Size = UDim2.new(0,150,0,35)
-	gui.StudsOffset = Vector3.new(0,3,0)
-	gui.AlwaysOnTop = true
-	gui.Parent = part
+    -- Highlight
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = obj:IsA("Model") and obj or part
+    highlight.FillColor = color
+    highlight.OutlineColor = Color3.new(1, 1, 1)
+    highlight.FillTransparency = 0.35
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = obj
 
-	local txt = Instance.new("TextLabel")
-	txt.Size = UDim2.fromScale(1,1)
-	txt.BackgroundTransparency = 1
-	txt.Text = "📦 CRATE"
-	txt.Font = Enum.Font.GothamBold
-	txt.TextSize = 16
-	txt.TextStrokeTransparency = 0
-	txt.TextColor3 = Color3.fromRGB(255,200,60)
-	txt.Parent = gui
+    -- Billboard
+    local billboard = Instance.new("BillboardGui")
+    billboard.Adornee = part
+    billboard.Size = UDim2.new(0, 150, 0, 40)
+    billboard.StudsOffset = Vector3.new(0, 3.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = part
 
-	tracked[model] = {
-		part = part,
-		gui = gui,
-		hl = highlight
-	}
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = "📦 " .. rarity .. " Chest"
+    label.TextColor3 = color
+    label.TextStrokeTransparency = 0
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 16
+    label.Parent = billboard
+
+    trackedChests[obj] = {
+        obj = obj,
+        part = part,
+        rarity = rarity,
+        highlight = highlight,
+        billboard = billboard,
+    }
 end
 
-local function clear()
-	for _, v in pairs(tracked) do
-		pcall(function()
-			v.gui:Destroy()
-			v.hl:Destroy()
-		end)
-	end
-	tracked = {}
+local function clearAll()
+    for _, data in pairs(trackedChests) do
+        pcall(function()
+            data.highlight:Destroy()
+            data.billboard:Destroy()
+        end)
+    end
+    trackedChests = {}
 end
 
 -- ==============================
--- SCAN (CORRECT)
+-- SCANNING (FIXED)
 -- ==============================
 local function scan()
-	if not ChestModule.Enabled then return end
-	if tick() - lastScan < ChestModule.ScanInterval then return end
-	lastScan = tick()
+    if not ChestModule.Enabled then return end
+    if tick() - lastScan < ChestModule.ScanInterval then return end
+    lastScan = tick()
 
-	for _, root in ipairs(ScanRoots) do
-		for _, obj in ipairs(root:GetDescendants()) do
-			if obj:IsA("Model") then
-				local n = obj.Name:lower()
-				if n == "crate" or n == "crates" or n == "twocrates" then
-					createESP(obj)
-				end
-			end
-		end
-	end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if isChestCandidate(obj) then
+            createESP(obj)
+        end
+    end
 end
 
 -- ==============================
--- TELEPORT
+-- AUTO TELEPORT
 -- ==============================
 function ChestModule:TeleportToNearest()
-	local best, dist = nil, math.huge
+    local closest, dist = nil, math.huge
 
-	for _, v in pairs(tracked) do
-		local d = (rootPart.Position - v.part.Position).Magnitude
-		if d < dist then
-			dist = d
-			best = v
-		end
-	end
+    for _, data in pairs(trackedChests) do
+        if data.part and data.part:IsDescendantOf(workspace) then
+            local d = (rootPart.Position - data.part.Position).Magnitude
+            if d < dist then
+                dist = d
+                closest = data
+            end
+        end
+    end
 
-	if not best then return end
+    if not closest then return end
 
-	local cf = best.part.CFrame * CFrame.new(0,3,3)
-	TweenService:Create(
-		rootPart,
-		TweenInfo.new(dist/140, Enum.EasingStyle.Quint),
-		{CFrame = cf}
-	):Play()
+    local targetCF = closest.part.CFrame * CFrame.new(0, 3, 3)
+    TweenService:Create(
+        rootPart,
+        TweenInfo.new(math.clamp(dist / 120, 0.3, 3), Enum.EasingStyle.Quint),
+        { CFrame = targetCF }
+    ):Play()
 end
 
 -- ==============================
--- API
+-- PUBLIC API
 -- ==============================
 function ChestModule:Enable()
-	ChestModule.Enabled = true
+    ChestModule.Enabled = true
 end
 
 function ChestModule:Disable()
-	ChestModule.Enabled = false
-	clear()
+    ChestModule.Enabled = false
+    clearAll()
 end
 
-function ChestModule:SetAutoTeleport(b)
-	ChestModule.AutoTeleport = b
+function ChestModule:SetAutoTeleport(state)
+    ChestModule.AutoTeleport = state
 end
 
 -- ==============================
 -- LOOP
 -- ==============================
 RunService.Heartbeat:Connect(function()
-	scan()
-	if ChestModule.Enabled and ChestModule.AutoTeleport then
-		ChestModule:TeleportToNearest()
-	end
+    scan()
+    if ChestModule.Enabled and ChestModule.AutoTeleport then
+        ChestModule:TeleportToNearest()
+    end
 end)
 
 return ChestModule
